@@ -52,7 +52,7 @@ print(f"  (This will take a few minutes — saving as we go)\n")
 
 articles = sp500["wiki_article"].tolist()
 checkpoint = os.path.join(RAW_DIR, "wiki_pageviews_checkpoint.csv")
-views_df = get_pageviews_bulk(articles, START_WIKI, END_WIKI, checkpoint_path=checkpoint)
+views_df = get_pageviews_bulk(articles, START_WIKI, END_WIKI, checkpoint_path=checkpoint, batch_limit=300)
 
 print(f"\n  Got {len(views_df):,} rows for {views_df['article'].nunique()} articles")
 # Rename checkpoint to final file

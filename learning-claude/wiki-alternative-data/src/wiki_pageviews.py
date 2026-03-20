@@ -60,7 +60,7 @@ def get_pageviews(article: str, start: str, end: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def get_pageviews_bulk(articles: list, start: str, end: str, checkpoint_path: str = None) -> pd.DataFrame:
+def get_pageviews_bulk(articles: list, start: str, end: str, checkpoint_path: str = None, batch_limit: int = None) -> pd.DataFrame:
     """
     Fetch pageviews for a list of articles and combine into one DataFrame.
     Supports checkpointing: saves progress to checkpoint_path as it goes,
@@ -71,6 +71,8 @@ def get_pageviews_bulk(articles: list, start: str, end: str, checkpoint_path: st
         start:            Start date as "YYYYMMDD"
         end:              End date as "YYYYMMDD"
         checkpoint_path:  Optional path to a CSV file for incremental saves
+        batch_limit:      Stop after fetching this many new articles (for session splitting).
+                          Resume next run from checkpoint — already-fetched articles are skipped.
 
     Returns:
         DataFrame with columns: date, article, views
@@ -82,26 +84,46 @@ def get_pageviews_bulk(articles: list, start: str, end: str, checkpoint_path: st
         fetched_articles = set(existing["article"].unique())
         print(f"  Resuming from checkpoint: {len(fetched_articles)} articles already fetched")
 
-    remaining = [a for a in articles if a not in fetched_articles]
-    print(f"  {len(remaining)} articles to fetch ({len(fetched_articles)} already done)\n")
+    # Load already-skipped (404) articles so we don't retry them
+    skipped_path = checkpoint_path.replace(".csv", "_skipped.csv") if checkpoint_path else None
+    known_skipped = set()
+    if skipped_path and os.path.exists(skipped_path):
+        known_skipped = set(pd.read_csv(skipped_path)["article"].tolist())
+        print(f"  Skipping {len(known_skipped)} known-404 articles")
 
-    skipped = []
+    remaining = [a for a in articles if a not in fetched_articles and a not in known_skipped]
+    if batch_limit:
+        remaining = remaining[:batch_limit]
+        print(f"  Batch limit: fetching up to {batch_limit} articles this run")
+    print(f"  {len(remaining)} articles to fetch ({len(fetched_articles)} already done, {len(known_skipped)} known 404s)\n")
+
+    newly_skipped = []
     for i, article in enumerate(remaining):
         print(f"  ({len(fetched_articles)+i+1}/{len(articles)}) {article}")
         df = get_pageviews(article, start, end)
 
-        if df.empty and article not in fetched_articles:
-            skipped.append(article)
-        elif not df.empty:
+        if df.empty:
+            newly_skipped.append(article)
+            # Record 404s so they're not retried next run
+            if skipped_path:
+                pd.DataFrame({"article": [article]}).to_csv(
+                    skipped_path, mode="a", header=not os.path.exists(skipped_path), index=False
+                )
+        else:
             if checkpoint_path:
                 df.to_csv(checkpoint_path, mode="a", header=not os.path.exists(checkpoint_path), index=False)
 
         time.sleep(0.2)
 
-    if skipped:
-        print(f"\n  Skipped {len(skipped)} articles (rate limited or not found): {skipped[:5]}{'...' if len(skipped) > 5 else ''}")
+    if newly_skipped:
+        print(f"\n  Skipped {len(newly_skipped)} articles (rate limited or not found): {newly_skipped[:5]}{'...' if len(newly_skipped) > 5 else ''}")
 
-    # Return full dataset from checkpoint file, or from memory
+    if batch_limit and len(remaining) == batch_limit:
+        total_done = len(fetched_articles) + len(remaining)
+        print(f"\n  Batch complete. {total_done}/{len(articles)} articles done total.")
+        print(f"  Run again to continue from article {total_done + 1}.")
+
+    # Return full dataset from checkpoint file
     if checkpoint_path and os.path.exists(checkpoint_path):
         return pd.read_csv(checkpoint_path, parse_dates=["date"])
 

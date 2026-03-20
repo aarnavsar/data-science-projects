@@ -32,7 +32,16 @@ def detect_spikes(views_df: pd.DataFrame) -> pd.DataFrame:
         .transform(lambda s: s.rolling(30, min_periods=10).std())
     )
 
-    df["is_spike"] = df["views"] > df["rolling_mean"] + 2 * df["rolling_std"]
+    df["z_score"] = (df["views"] - df["rolling_mean"]) / df["rolling_std"]
+    df["is_spike"] = df["z_score"] > 2
+
+    # Spike tier — only meaningful on is_spike days (NaN for non-spike rows)
+    df["spike_tier"] = pd.cut(
+        df["z_score"],
+        bins=[2, 3, 5, float("inf")],
+        labels=["weak", "medium", "strong"],
+        right=False,
+    )
 
     return df.reset_index(drop=True)
 
@@ -81,22 +90,35 @@ def build_signal_table(spike_df: pd.DataFrame, returns_df: pd.DataFrame) -> pd.D
 
     Returns:
         DataFrame with columns:
-            date, ticker, views, is_spike,
-            next_day_abnormal_return, next_day_volume_ratio
+            date, ticker, views, z_score, is_spike, spike_tier,
+            next_day_abnormal_return, next_day_volume_ratio,
+            next_2day_abnormal_return, next_3day_abnormal_return,
+            next_5day_abnormal_return
     """
     # Compute next-day values by shifting within each ticker group
     ret = returns_df.copy().sort_values(["ticker", "date"])
     ret["next_day_abnormal_return"] = ret.groupby("ticker")["abnormal_return"].shift(-1)
     ret["next_day_volume_ratio"] = ret.groupby("ticker")["volume_ratio"].shift(-1)
 
+    # Multi-lag cumulative abnormal returns (CAR): sum of daily abnormal returns t+1 to t+n
+    for n in [2, 3, 5]:
+        ret[f"next_{n}day_abnormal_return"] = sum(
+            ret.groupby("ticker")["abnormal_return"].shift(-i) for i in range(1, n + 1)
+        )
+
+    lag_cols = [f"next_{n}day_abnormal_return" for n in [2, 3, 5]]
     merged = spike_df.merge(
-        ret[["date", "ticker", "next_day_abnormal_return", "next_day_volume_ratio"]],
+        ret[["date", "ticker", "next_day_abnormal_return", "next_day_volume_ratio"] + lag_cols],
         on=["date", "ticker"],
         how="left",
     )
 
-    return merged[["date", "ticker", "views", "is_spike",
-                   "next_day_abnormal_return", "next_day_volume_ratio"]]
+    # Build output column list — include z_score/spike_tier if detect_spikes added them
+    optional = [c for c in ["z_score", "spike_tier"] if c in merged.columns]
+    out_cols = (["date", "ticker", "views"] + optional +
+                ["is_spike", "next_day_abnormal_return", "next_day_volume_ratio"] + lag_cols)
+
+    return merged[out_cols]
 
 
 if __name__ == "__main__":
